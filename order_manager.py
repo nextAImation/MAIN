@@ -418,6 +418,16 @@ class OrderManager:
         
         for parent_id in expired_oco_groups:
             del self.oco_groups[parent_id]
+    def get_order_history(self):
+            """
+            Lightweight snapshot for reporting / backtest_runner.
+            For now, just return all orders as a list.
+            In our smoke test, DummyStrategy never opens orders,
+            so this will usually be an empty list.
+            """
+            if hasattr(self, "all_orders"):
+                return list(self.all_orders.values())
+            return []
 
 # CHANGELOG (Stage 7)
 # - Fixed get_active_stop_orders to be canonical source for MatchingEngine
