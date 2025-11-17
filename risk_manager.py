@@ -57,10 +57,11 @@ class RiskManager:
     """
     
     def __init__(self, initial_equity: float = 10000.0, params: Optional[RiskParameters] = None):
+        
         self.initial_equity = initial_equity
         self.current_equity = initial_equity
         self.params = params or RiskParameters()
-        
+        self._last_equity_timestamp = None
         self.state = RiskState(
             daily_pnl=0.0,
             daily_trades=0,
@@ -293,12 +294,46 @@ class RiskManager:
         """Calculate current total exposure across all symbols"""
         return sum(self.state.symbol_exposures.values())
     
-    def _is_new_day(self, timestamp: int) -> bool:
-        """Check if timestamp represents a new trading day"""
-        current_dt = datetime.fromtimestamp(timestamp / 1000)  # Assuming ms timestamp
-        last_reset_dt = datetime.fromtimestamp(self.state.daily_start_time / 1000)
-        
-        return current_dt.date() != last_reset_dt.date()
+    def _is_new_day(self, timestamp):
+        """
+        Detects whether this equity update belongs to a new day.
+
+        `timestamp` ممکن است:
+        - عدد میلی‌ثانیه‌ای (int/float)
+        - رشته‌ی عددی (مثلاً "1731788162000")
+        - خودِ datetime باشد
+        """
+        # اگر خودش datetime بود، همون را استفاده کن
+        if isinstance(timestamp, datetime):
+            current_dt = timestamp
+        else:
+            # اگر رشته است، سعی کن به عدد تبدیلش کنی
+            if isinstance(timestamp, str):
+                # معمول‌ترین حالت: رشته‌ی عددیِ میلی‌ثانیه
+                try:
+                    timestamp = float(timestamp)
+                except ValueError:
+                    # اگر اصلاً عدد نبود (مثلاً ISO string)، آخرین تلاش:
+                    current_dt = datetime.fromisoformat(timestamp)
+                else:
+                    # timestamp الان float میلی‌ثانیه است
+                    current_dt = datetime.fromtimestamp(timestamp / 1000.0)
+            else:
+                # int / float → میلی‌ثانیه
+                current_dt = datetime.fromtimestamp(float(timestamp) / 1000.0)
+
+        # از اینجا به بعد منطق قبلی خودت را نگه دار
+        if self._last_equity_timestamp is None:
+            self._last_equity_timestamp = current_dt
+            return True
+
+        last_dt = self._last_equity_timestamp
+        if current_dt.date() != last_dt.date():
+            self._last_equity_timestamp = current_dt
+            return True
+
+        return False
+
     
     def _reset_daily_metrics(self, timestamp: int) -> None:
         """Reset daily risk metrics"""

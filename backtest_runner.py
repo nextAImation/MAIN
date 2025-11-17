@@ -427,6 +427,7 @@ class BacktestRunner:
 
         fills = self.matching_engine.process_bar(
             open_price=Decimal(str(bar_data["open"])),
+
             high=Decimal(str(bar_data["high"])),
             low=Decimal(str(bar_data["low"])),
             close=Decimal(str(bar_data["close"])),
