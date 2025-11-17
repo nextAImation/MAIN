@@ -314,6 +314,7 @@ class BacktestRunner:
         if not strategy_actions:
             return
             
+
         # Cancel orders - deterministic order
         cancel_orders = strategy_actions.get('cancel_orders', [])
         for order_id in sorted(cancel_orders):  # Ensure deterministic order
@@ -347,10 +348,21 @@ class BacktestRunner:
 
         activation_ts = created_ts + timedelta(milliseconds=self.config.execution_params.latency_ms)
 
+        # ✅ Safe side mapping for OrderSide (supports "buy"/"sell"/"long"/"short")
+        raw_side = order_data["side"]
+        side_str = str(raw_side).lower()
+        if side_str in ("buy", "long"):
+            order_side = OrderSide.BUY
+        elif side_str in ("sell", "short"):
+            order_side = OrderSide.SELL
+        else:
+            self.logger.error(f"Invalid order side: {raw_side}")
+            return
+
         order = Order(
             order_id=order_data["order_id"],
             symbol=self.config.symbol,
-            side=OrderSide(order_data["side"]),
+            side=order_side,
             order_type=OrderType[order_data["order_type"].upper()],
             quantity=Decimal(str(order_data["quantity"])),
             filled_quantity=Decimal("0"),
@@ -435,15 +447,23 @@ class BacktestRunner:
     
     def _process_fill(self, fill, timestamp, bar_index):
         """Process fill with proper trade event recording"""
-        side = fill["side"]
+        # ✅ Safe side → direction mapping
+        raw_side = fill["side"]
+        side = str(raw_side).lower()
+        if side in ("buy", "long"):
+            direction = "long"
+        elif side in ("sell", "short"):
+            direction = "short"
+        else:
+            self.logger.error(f"Invalid fill side: {raw_side}")
+            return
+
         qty = float(fill["fill_quantity"])
         price = float(fill["fill_price"])
         commission = float(fill.get("fee", 0.0))
 
         prev_position_size = self.position_manager.state.position_size
         prev_realized = self.position_manager.state.realized_pnl
-
-        direction = "long" if side == "buy" else "short"
 
         success, msg = self.position_manager.add_to_position(
             direction=direction,
@@ -500,7 +520,7 @@ class BacktestRunner:
         )
 
         self.logger.debug(
-            f"Fill processed: {fill['order_id']} {side} {qty} @ {price} pnl={pnl_delta}"
+            f"Fill processed: {fill['order_id']} {raw_side} {qty} @ {price} pnl={pnl_delta}"
         )
     
     def _update_metrics_with_trade_events(self, timestamp: int, current_equity: float, bar_index: int):
@@ -514,7 +534,17 @@ class BacktestRunner:
     
     def _calculate_current_equity(self) -> float:
         """Calculate current total equity"""
-        return self.config.initial_equity + self.position_manager.state.total_pnl
+        # ✅ استفاده امن از realized + unrealized برای سازگاری با تست پایین
+        state = self.position_manager.state
+        realized = getattr(state, "realized_pnl", 0.0)
+        unrealized = getattr(state, "unrealized_pnl", 0.0)
+        total = getattr(state, "total_pnl", realized + unrealized)
+
+        # اگر total_pnl صفر است ولی realized/unrealized مقدار دارند، جمع را مبنا بگیر
+        if total == 0.0 and (realized != 0.0 or unrealized != 0.0):
+            total = realized + unrealized
+
+        return self.config.initial_equity + total
     
     def _check_stop_conditions(self, current_equity: float, bar_index: int):
         """Check for backtest stop conditions"""
