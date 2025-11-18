@@ -1273,7 +1273,18 @@ class RadarCore:
 
         pos_size = s.position_size
         prev_pos_size = s.prev_position_size
-        pos_avg = s.position_avg_price
+        pos_avg = s.position_avg_price if not math.isnan(s.position_avg_price) else close
+
+        if atr is None or math.isnan(atr):
+            atr = 0.0
+        if adx_s is None or math.isnan(adx_s):
+            adx_s = 0.0
+        if di_plus is None or math.isnan(di_plus):
+            di_plus = 0.0
+        if di_minus is None or math.isnan(di_minus):
+            di_minus = 0.0
+        if slow_ma is None or math.isnan(slow_ma):
+            slow_ma = close
 
         # ورود جدید Long
         if pos_size > 0 and prev_pos_size <= 0:
