@@ -990,7 +990,7 @@ class RadarCore:
         choch_dn = (not math.isnan(s.last_lh)) and (c > s.last_lh)
         s.choch_warning = cfg.use_choch_soft and (choch_up or choch_dn)
 
-        strict_cond = adx_low and not s.choch_warning
+        strict_cond = (adx_s > cfg.adx_th_fixed)
         strict_long = cfg.adx_soft_strict and strict_cond
         strict_short = (cfg.strict_short or cfg.adx_soft_strict) and strict_cond
 
@@ -1232,18 +1232,22 @@ class RadarCore:
 
         choch_soft_block = cfg.use_choch_soft and s.choch_warning
 
+        # CHOCH soft block: only disables early entries
+        if choch_soft_block:
+            can_early_long = False
+            can_early_short = False
+        # breakout / pullback / cross must NOT be disabled here
+
         cross_long_final = cross_long and not (breakout_long or pullback_long)
         cross_short_final = cross_short and not (breakout_short or pullback_short)
 
         final_long = (
             (breakout_long or pullback_long or cross_long_final or early_long)
             and struct_ok_long_relaxed
-            and not choch_soft_block
         )
         final_short = (
             (breakout_short or pullback_short or cross_short_final or early_short)
             and struct_ok_short_relaxed
-            and not choch_soft_block
         )
 
         return {
@@ -1358,9 +1362,11 @@ class RadarCore:
             # Weak Exit Logic (LONG)
             exitWeakRawL = (close < slow_ma) or (adx_s < 18) or (di_plus < di_minus)
 
+            # Update last index where WeakExit condition was NOT true (trend still healthy)
             if not exitWeakRawL:
                 s.last_not_exitweak_l_idx = idx
-                last_not_idx = idx
+
+            last_not_idx = s.last_not_exitweak_l_idx
             if last_not_idx is None:
                 exitWeakL = False
             else:
@@ -1414,9 +1420,11 @@ class RadarCore:
             # Weak Exit Logic (SHORT)
             exitWeakRawS = (close > slow_ma) or (adx_s < 20) or (di_plus > di_minus)
 
+            # Update last index where WeakExit condition was NOT true (trend still healthy)
             if not exitWeakRawS:
                 s.last_not_exitweak_s_idx = idx
-                last_not_idx_s = idx
+
+            last_not_idx_s = s.last_not_exitweak_s_idx
             if last_not_idx_s is None:
                 exitWeakS = False
             else:
