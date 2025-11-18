@@ -1189,6 +1189,12 @@ class RadarCore:
             and guard_short
         )
 
+        can_early_long = early_long
+        can_early_short = early_short
+        if cfg.use_choch_soft and s.choch_warning:
+            can_early_long = False
+            can_early_short = False
+
         cross_up = self._cross(fast_ma, slow_ma)
         cross_down = self._crossunder(fast_ma, slow_ma)
 
