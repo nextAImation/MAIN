@@ -92,6 +92,12 @@ class RadarCoreConfig:
     use_daily_in_bypass: bool = True
     allow_daily_neutral: bool = True
 
+    # Data integrity (from Pine inputs)
+    use_data_sentinel: bool = True
+    enable_fallback: bool = True
+    max_data_gap: int = 5
+    alert_on_data_issue: bool = True
+
     # Range bypass
     use_range_bypass: bool = True
 
@@ -117,6 +123,9 @@ class RadarState:
     fast_ma: List[float] = field(default_factory=list)
     slow_ma: List[float] = field(default_factory=list)
     reg_ma: List[float] = field(default_factory=list)
+    tema1_cache: Dict[int, float] = field(default_factory=dict)
+    tema2_cache: Dict[int, float] = field(default_factory=dict)
+    tema3_cache: Dict[int, float] = field(default_factory=dict)
 
     # ATR intraday
     atr_series: List[float] = field(default_factory=list)
@@ -130,6 +139,8 @@ class RadarState:
 
     # RSI
     rsi_series: List[float] = field(default_factory=list)
+    rsi_avg_gain_series: List[float] = field(default_factory=list)
+    rsi_avg_loss_series: List[float] = field(default_factory=list)
 
     # Volume
     vol_ma_series: List[float] = field(default_factory=list)
@@ -178,6 +189,8 @@ class RadarState:
     daily_up_ok: bool = True
     daily_down_ok: bool = True
     daily_state: int = 0
+    daily_trend_up_ok: bool = True
+    daily_trend_down_ok: bool = True
 
     # Position / trade state
     equity: float = math.nan
@@ -313,9 +326,13 @@ class RadarCore:
         d_state = daily_info["d_state"]
         daily_ok_long = daily_info["daily_ok_long"]
         daily_ok_short = daily_info["daily_ok_short"]
+        trend_ok_long = daily_info["trend_ok_long"]
+        trend_ok_short = daily_info["trend_ok_short"]
         s.daily_state = d_state
-        s.daily_up_ok = daily_ok_long
-        s.daily_down_ok = daily_ok_short
+        s.daily_up_ok = trend_ok_long
+        s.daily_down_ok = trend_ok_short
+        s.daily_trend_up_ok = trend_ok_long
+        s.daily_trend_down_ok = trend_ok_short
 
         # ========================================================
         # Phase 3 – Market Structure (needs ATR, ADX, daily)
@@ -509,8 +526,19 @@ class RadarCore:
             prev = series[-1] if series else None
             val = self._ema(prev, price, length)
         elif ma_type_upper == "TEMA":
-            prev = series[-1] if series else None
-            val = self._ema(prev, price, length)
+            prev1 = self.state.tema1_cache.get(length, math.nan)
+            prev2 = self.state.tema2_cache.get(length, math.nan)
+            prev3 = self.state.tema3_cache.get(length, math.nan)
+
+            ema1 = self._ema(prev1 if not math.isnan(prev1) else None, price, length)
+            ema2 = self._ema(prev2 if not math.isnan(prev2) else None, ema1, length)
+            ema3 = self._ema(prev3 if not math.isnan(prev3) else None, ema2, length)
+
+            self.state.tema1_cache[length] = ema1
+            self.state.tema2_cache[length] = ema2
+            self.state.tema3_cache[length] = ema3
+
+            val = 3.0 * (ema1 - ema2) + ema3
         elif ma_type_upper == "HMA":
             val = self._hma(src, length)
         else:
@@ -623,24 +651,44 @@ class RadarCore:
         length = self.cfg.rsi_len
         closes = s.closes
 
-        if len(closes) < length + 1:
+        if len(closes) < 2:
             s.rsi_series.append(math.nan)
+            s.rsi_avg_gain_series.append(math.nan)
+            s.rsi_avg_loss_series.append(math.nan)
             return math.nan
 
-        gains = 0.0
-        losses = 0.0
-        for i in range(len(closes) - length, len(closes)):
-            change = closes[i] - closes[i - 1]
-            if change > 0:
-                gains += change
-            else:
-                losses -= change
+        change = closes[-1] - closes[-2]
+        gain = max(change, 0.0)
+        loss = max(-change, 0.0)
 
-        avg_gain = gains / length
-        avg_loss = losses / length if losses != 0 else 0.0
+        if not s.rsi_avg_gain_series or math.isnan(s.rsi_avg_gain_series[-1]):
+            if len(closes) - 1 < length:
+                s.rsi_series.append(math.nan)
+                s.rsi_avg_gain_series.append(math.nan)
+                s.rsi_avg_loss_series.append(math.nan)
+                return math.nan
+
+            gains = 0.0
+            losses = 0.0
+            for i in range(len(closes) - length, len(closes)):
+                ch = closes[i] - closes[i - 1]
+                if ch > 0:
+                    gains += ch
+                else:
+                    losses -= ch
+            avg_gain = gains / length
+            avg_loss = losses / length
+        else:
+            prev_avg_gain = s.rsi_avg_gain_series[-1]
+            prev_avg_loss = s.rsi_avg_loss_series[-1]
+            avg_gain = (prev_avg_gain * (length - 1) + gain) / length
+            avg_loss = (prev_avg_loss * (length - 1) + loss) / length
+
+        s.rsi_avg_gain_series.append(avg_gain)
+        s.rsi_avg_loss_series.append(avg_loss)
 
         if avg_loss == 0:
-            rsi = 100.0
+            rsi = 100.0 if avg_gain > 0 else 0.0
         else:
             rs = avg_gain / avg_loss
             rsi = 100.0 - 100.0 / (1.0 + rs)
@@ -696,6 +744,16 @@ class RadarCore:
         d50 = s.d50_series[-1] if s.d50_series else math.nan
 
         if math.isnan(d20) or math.isnan(d50):
+            daily_up = False
+            daily_down = False
+        else:
+            daily_up = d20 > (d50 * cfg.daily_soft_k)
+            daily_down = d20 < (d50 / cfg.daily_soft_k)
+
+        trend_ok_long = (not cfg.use_trend_filter) or daily_up
+        trend_ok_short = (not cfg.use_trend_filter) or daily_down
+
+        if math.isnan(d20) or math.isnan(d50):
             d_bias = 0
         else:
             if d20 > d50:
@@ -739,6 +797,8 @@ class RadarCore:
             "d_state": d_state,
             "daily_ok_long": daily_ok_long,
             "daily_ok_short": daily_ok_short,
+            "trend_ok_long": trend_ok_long,
+            "trend_ok_short": trend_ok_short,
         }
 
     def _finalize_previous_day(self):
@@ -780,13 +840,9 @@ class RadarCore:
         if n == 0:
             return
 
-        if n == 1:
-            s.atr_d_series.append(math.nan)
-            return
-
         high = s.daily_highs[-1]
         low = s.daily_lows[-1]
-        prev_close = s.daily_closes[-2]
+        prev_close = s.daily_closes[-2] if n >= 2 else s.daily_closes[-1]
 
         tr = max(
             high - low,
@@ -795,17 +851,17 @@ class RadarCore:
         )
 
         if len(s.atr_d_series) == 0 or math.isnan(s.atr_d_series[-1]):
-            if n < length + 1:
-                s.atr_d_series.append(math.nan)
-                return
-
+            total_bars = n
             trs = []
-            for i in range(n - length, n):
+            for i in range(total_bars):
                 hi = s.daily_highs[i]
                 lo = s.daily_lows[i]
                 pc = s.daily_closes[i - 1] if i > 0 else s.daily_closes[i]
                 trs.append(max(hi - lo, abs(hi - pc), abs(lo - pc)))
-            atr_d = sum(trs) / float(length)
+
+            window = min(length, len(trs))
+            atr_seed = sum(trs[-window:]) / float(window)
+            atr_d = atr_seed
         else:
             prev_atr_d = s.atr_d_series[-1]
             atr_d = (prev_atr_d * (length - 1) + tr) / float(length)
@@ -1011,10 +1067,11 @@ class RadarCore:
         vol_ok_long = (not cfg.use_vol) or (vol_ratio > cfg.vol_k_long)
         vol_ok_short = (not cfg.use_vol) or (vol_ratio > cfg.vol_k_long)
 
-        if cfg.require_adx_up:
-            power_ok = (adx_s > adx_base)
-        else:
-            power_ok = (adx_s > adx_base)
+        prev_adx = s.adx_s[-2] if len(s.adx_s) >= 2 else math.nan
+        adx_rising_ok = (not cfg.require_adx_up) or (
+            (not math.isnan(prev_adx)) and (adx_s > prev_adx)
+        )
+        power_ok = (adx_s > adx_base) and adx_rising_ok
 
         rr_ok_long = cfg.tp1_ratio >= 1.6
         rr_ok_short = cfg.tp1_ratio >= 1.6
