@@ -92,6 +92,12 @@ class RadarCoreConfig:
     use_daily_in_bypass: bool = True
     allow_daily_neutral: bool = True
 
+    # Data integrity (from Pine inputs)
+    use_data_sentinel: bool = True
+    enable_fallback: bool = True
+    max_data_gap: int = 5
+    alert_on_data_issue: bool = True
+
     # Range bypass
     use_range_bypass: bool = True
 
@@ -117,6 +123,9 @@ class RadarState:
     fast_ma: List[float] = field(default_factory=list)
     slow_ma: List[float] = field(default_factory=list)
     reg_ma: List[float] = field(default_factory=list)
+    tema1_cache: Dict[int, float] = field(default_factory=dict)
+    tema2_cache: Dict[int, float] = field(default_factory=dict)
+    tema3_cache: Dict[int, float] = field(default_factory=dict)
 
     # ATR intraday
     atr_series: List[float] = field(default_factory=list)
@@ -130,6 +139,8 @@ class RadarState:
 
     # RSI
     rsi_series: List[float] = field(default_factory=list)
+    rsi_avg_gain_series: List[float] = field(default_factory=list)
+    rsi_avg_loss_series: List[float] = field(default_factory=list)
 
     # Volume
     vol_ma_series: List[float] = field(default_factory=list)
@@ -178,6 +189,8 @@ class RadarState:
     daily_up_ok: bool = True
     daily_down_ok: bool = True
     daily_state: int = 0
+    daily_trend_up_ok: bool = True
+    daily_trend_down_ok: bool = True
 
     # Position / trade state
     equity: float = math.nan
@@ -197,8 +210,8 @@ class RadarState:
     inited_s: bool = False
 
     # Weak exit barssince state
-    last_not_exitweak_l_idx: int = 0
-    last_not_exitweak_s_idx: int = 0
+    last_not_exitweak_l_idx: Optional[int] = None
+    last_not_exitweak_s_idx: Optional[int] = None
 
     # Cooldown
     last_exit_bar: Optional[int] = None
@@ -313,9 +326,13 @@ class RadarCore:
         d_state = daily_info["d_state"]
         daily_ok_long = daily_info["daily_ok_long"]
         daily_ok_short = daily_info["daily_ok_short"]
+        trend_ok_long = daily_info["trend_ok_long"]
+        trend_ok_short = daily_info["trend_ok_short"]
         s.daily_state = d_state
         s.daily_up_ok = daily_ok_long
         s.daily_down_ok = daily_ok_short
+        s.daily_trend_up_ok = trend_ok_long
+        s.daily_trend_down_ok = trend_ok_short
 
         # ========================================================
         # Phase 3 – Market Structure (needs ATR, ADX, daily)
@@ -333,6 +350,9 @@ class RadarCore:
             daily_ok_long=daily_ok_long,
             daily_ok_short=daily_ok_short,
         )
+
+        if s.position_size == 0 and s.prev_position_size != 0:
+            s.last_exit_bar = idx
 
         # Cooldown
         if cfg.use_cooldown and s.last_exit_bar is not None:
@@ -485,17 +505,32 @@ class RadarCore:
         s_val = sum(v * w for v, w in zip(window, weights))
         return s_val / float(sum(weights))
 
-    @staticmethod
-    def _hma(series: List[float], length: int) -> float:
+    def _hma(self, series: List[float], length: int) -> float:
         if length <= 0 or len(series) < length:
             return math.nan
+
         half_len = max(1, length // 2)
         sqrt_len = max(1, int(math.sqrt(length)))
 
-        wma_half = RadarCore._wma(series, half_len)
-        wma_full = RadarCore._wma(series, length)
-        diff = 2.0 * wma_half - wma_full
-        return diff  # تقریب HMA
+        temps: List[float] = []
+        for i in range(sqrt_len):
+            sub_end = len(series) - i
+            if sub_end < length:
+                break
+            sub_series = series[:sub_end]
+            wma_half = self._wma(sub_series, half_len)
+            wma_full = self._wma(sub_series, length)
+            if math.isnan(wma_half) or math.isnan(wma_full):
+                temp = math.nan
+            else:
+                temp = 2.0 * wma_half - wma_full
+            temps.append(temp)
+
+        if len(temps) < sqrt_len:
+            return math.nan
+
+        temps = list(reversed(temps))
+        return self._wma(temps, sqrt_len)
 
     def _update_ma(self, series: List[float], src: List[float], length: int, ma_type: str) -> float:
         if len(src) == 0:
@@ -509,8 +544,19 @@ class RadarCore:
             prev = series[-1] if series else None
             val = self._ema(prev, price, length)
         elif ma_type_upper == "TEMA":
-            prev = series[-1] if series else None
-            val = self._ema(prev, price, length)
+            prev1 = self.state.tema1_cache.get(length, math.nan)
+            prev2 = self.state.tema2_cache.get(length, math.nan)
+            prev3 = self.state.tema3_cache.get(length, math.nan)
+
+            ema1 = self._ema(prev1 if not math.isnan(prev1) else None, price, length)
+            ema2 = self._ema(prev2 if not math.isnan(prev2) else None, ema1, length)
+            ema3 = self._ema(prev3 if not math.isnan(prev3) else None, ema2, length)
+
+            self.state.tema1_cache[length] = ema1
+            self.state.tema2_cache[length] = ema2
+            self.state.tema3_cache[length] = ema3
+
+            val = 3.0 * (ema1 - ema2) + ema3
         elif ma_type_upper == "HMA":
             val = self._hma(src, length)
         else:
@@ -539,16 +585,15 @@ class RadarCore:
         )
 
         if len(s.atr_series) == 0 or math.isnan(s.atr_series[-1]):
-            if n < length + 1:
-                s.atr_series.append(math.nan)
-                return math.nan
-            trs = []
-            for i in range(n - length, n):
+            trs: List[float] = []
+            for i in range(n):
                 hi = s.highs[i]
                 lo = s.lows[i]
                 pc = s.closes[i - 1] if i > 0 else s.closes[i]
                 trs.append(max(hi - lo, abs(hi - pc), abs(lo - pc)))
-            atr = sum(trs) / float(length)
+
+            window = min(length, len(trs))
+            atr = sum(trs[-window:]) / float(window) if window > 0 else math.nan
         else:
             prev_atr = s.atr_series[-1]
             atr = (prev_atr * (length - 1) + tr) / float(length)
@@ -623,24 +668,44 @@ class RadarCore:
         length = self.cfg.rsi_len
         closes = s.closes
 
-        if len(closes) < length + 1:
+        if len(closes) < 2:
             s.rsi_series.append(math.nan)
+            s.rsi_avg_gain_series.append(math.nan)
+            s.rsi_avg_loss_series.append(math.nan)
             return math.nan
 
-        gains = 0.0
-        losses = 0.0
-        for i in range(len(closes) - length, len(closes)):
-            change = closes[i] - closes[i - 1]
-            if change > 0:
-                gains += change
-            else:
-                losses -= change
+        change = closes[-1] - closes[-2]
+        gain = max(change, 0.0)
+        loss = max(-change, 0.0)
 
-        avg_gain = gains / length
-        avg_loss = losses / length if losses != 0 else 0.0
+        if not s.rsi_avg_gain_series or math.isnan(s.rsi_avg_gain_series[-1]):
+            if len(closes) - 1 < length:
+                s.rsi_series.append(math.nan)
+                s.rsi_avg_gain_series.append(math.nan)
+                s.rsi_avg_loss_series.append(math.nan)
+                return math.nan
+
+            gains = 0.0
+            losses = 0.0
+            for i in range(len(closes) - length, len(closes)):
+                ch = closes[i] - closes[i - 1]
+                if ch > 0:
+                    gains += ch
+                else:
+                    losses -= ch
+            avg_gain = gains / length
+            avg_loss = losses / length
+        else:
+            prev_avg_gain = s.rsi_avg_gain_series[-1]
+            prev_avg_loss = s.rsi_avg_loss_series[-1]
+            avg_gain = (prev_avg_gain * (length - 1) + gain) / length
+            avg_loss = (prev_avg_loss * (length - 1) + loss) / length
+
+        s.rsi_avg_gain_series.append(avg_gain)
+        s.rsi_avg_loss_series.append(avg_loss)
 
         if avg_loss == 0:
-            rsi = 100.0
+            rsi = 100.0 if avg_gain > 0 else 0.0
         else:
             rs = avg_gain / avg_loss
             rsi = 100.0 - 100.0 / (1.0 + rs)
@@ -696,6 +761,16 @@ class RadarCore:
         d50 = s.d50_series[-1] if s.d50_series else math.nan
 
         if math.isnan(d20) or math.isnan(d50):
+            daily_up = False
+            daily_down = False
+        else:
+            daily_up = d20 > (d50 * cfg.daily_soft_k)
+            daily_down = d20 < (d50 / cfg.daily_soft_k)
+
+        trend_ok_long = (not cfg.use_trend_filter) or daily_up
+        trend_ok_short = (not cfg.use_trend_filter) or daily_down
+
+        if math.isnan(d20) or math.isnan(d50):
             d_bias = 0
         else:
             if d20 > d50:
@@ -713,12 +788,12 @@ class RadarCore:
 
         buf_d = (atr_d if not math.isnan(atr_d) else 0.0) * cfg.bos_buf_atr
 
-        if not math.isnan(roll_hh_d):
+        if not math.isnan(roll_hh_d) and not math.isnan(buf_d):
             d_bos_up = c > roll_hh_d + buf_d
         else:
             d_bos_up = False
 
-        if not math.isnan(roll_ll_d):
+        if not math.isnan(roll_ll_d) and not math.isnan(buf_d):
             d_bos_dn = c < roll_ll_d - buf_d
         else:
             d_bos_dn = False
@@ -739,6 +814,8 @@ class RadarCore:
             "d_state": d_state,
             "daily_ok_long": daily_ok_long,
             "daily_ok_short": daily_ok_short,
+            "trend_ok_long": trend_ok_long,
+            "trend_ok_short": trend_ok_short,
         }
 
     def _finalize_previous_day(self):
@@ -762,13 +839,11 @@ class RadarCore:
         s.d20_series.append(d20)
         s.d50_series.append(d50)
 
-        window = max(1, int(round(self.cfg.swing_len * 1.5)))
-        if len(s.daily_highs) >= window:
-            roll_hh = max(s.daily_highs[-window:])
-            roll_ll = min(s.daily_lows[-window:])
-        else:
-            roll_hh = s.daily_highs[-1]
-            roll_ll = s.daily_lows[-1]
+        window = max(1, int(self.cfg.swing_len * 1.5))
+        slice_h = s.daily_highs[-window:] if s.daily_highs else []
+        slice_l = s.daily_lows[-window:] if s.daily_lows else []
+        roll_hh = max(slice_h) if slice_h else math.nan
+        roll_ll = min(slice_l) if slice_l else math.nan
 
         s.roll_hh_d_series.append(roll_hh)
         s.roll_ll_d_series.append(roll_ll)
@@ -780,13 +855,9 @@ class RadarCore:
         if n == 0:
             return
 
-        if n == 1:
-            s.atr_d_series.append(math.nan)
-            return
-
         high = s.daily_highs[-1]
         low = s.daily_lows[-1]
-        prev_close = s.daily_closes[-2]
+        prev_close = s.daily_closes[-2] if n >= 2 else s.daily_closes[-1]
 
         tr = max(
             high - low,
@@ -795,17 +866,15 @@ class RadarCore:
         )
 
         if len(s.atr_d_series) == 0 or math.isnan(s.atr_d_series[-1]):
-            if n < length + 1:
-                s.atr_d_series.append(math.nan)
-                return
-
-            trs = []
-            for i in range(n - length, n):
+            trs: List[float] = []
+            for i in range(n):
                 hi = s.daily_highs[i]
                 lo = s.daily_lows[i]
                 pc = s.daily_closes[i - 1] if i > 0 else s.daily_closes[i]
                 trs.append(max(hi - lo, abs(hi - pc), abs(lo - pc)))
-            atr_d = sum(trs) / float(length)
+
+            window = min(length, len(trs))
+            atr_d = sum(trs[-window:]) / float(window) if window > 0 else math.nan
         else:
             prev_atr_d = s.atr_d_series[-1]
             atr_d = (prev_atr_d * (length - 1) + tr) / float(length)
@@ -821,22 +890,30 @@ class RadarCore:
     # ------------------------------------------------------------
     def _pivot_high(self, idx: int, length: int) -> float:
         s = self.state
-        if idx - length < 0 or idx + length >= len(s.highs):
+        center_idx = idx - length
+        if center_idx < length:
             return math.nan
-        center = s.highs[idx]
-        left = s.highs[idx - length: idx]
-        right = s.highs[idx + 1: idx + length + 1]
+        if center_idx + length >= len(s.highs):
+            return math.nan
+
+        center = s.highs[center_idx]
+        left = s.highs[center_idx - length: center_idx]
+        right = s.highs[center_idx + 1: center_idx + length + 1]
         if center == max(left + [center] + right):
             return center
         return math.nan
 
     def _pivot_low(self, idx: int, length: int) -> float:
         s = self.state
-        if idx - length < 0 or idx + length >= len(s.lows):
+        center_idx = idx - length
+        if center_idx < length:
             return math.nan
-        center = s.lows[idx]
-        left = s.lows[idx - length: idx]
-        right = s.lows[idx + 1: idx + length + 1]
+        if center_idx + length >= len(s.lows):
+            return math.nan
+
+        center = s.lows[center_idx]
+        left = s.lows[center_idx - length: center_idx]
+        right = s.lows[center_idx + 1: center_idx + length + 1]
         if center == min(left + [center] + right):
             return center
         return math.nan
@@ -881,15 +958,16 @@ class RadarCore:
         s.adx_low_series.append(adx_low)
 
         buf_mult = 1.4 if adx_low else 0.8
-        bos_buf = cfg.bos_buf_atr * (atr if not math.isnan(atr) else 0.0) * buf_mult
+        atr_ready = not math.isnan(atr)
+        bos_buf = cfg.bos_buf_atr * atr * buf_mult if atr_ready else math.nan
         s.bos_buf_series.append(bos_buf)
 
-        if not math.isnan(s.last_hh):
+        if not math.isnan(s.last_hh) and not math.isnan(bos_buf):
             bos_up = c > s.last_hh + bos_buf
         else:
             bos_up = False
 
-        if not math.isnan(s.last_ll):
+        if not math.isnan(s.last_ll) and not math.isnan(bos_buf):
             bos_dn = c < s.last_ll - bos_buf
         else:
             bos_dn = False
@@ -908,28 +986,33 @@ class RadarCore:
         choch_dn = (not math.isnan(s.last_lh)) and (c > s.last_lh)
         s.choch_warning = cfg.use_choch_soft and (choch_up or choch_dn)
 
-        strict_long = cfg.adx_soft_strict and adx_low
-        strict_short = cfg.strict_short or (cfg.adx_soft_strict and adx_low)
+        strict_cond = adx_s > cfg.adx_th_fixed
+        strict_long = cfg.adx_soft_strict and strict_cond
+        strict_short = (cfg.strict_short or (cfg.adx_soft_strict and strict_cond))
 
         if not cfg.use_struct:
             struct_ok_long = True
             struct_ok_short = True
         else:
-            struct_ok_long = s.struct_state == 1 if strict_long else s.struct_state >= 0
-            struct_ok_short = s.struct_state == -1 if strict_short else s.struct_state <= 0
+            struct_ok_long = (s.struct_state == 1) if strict_long else (s.struct_state >= 0)
+            struct_ok_short = (s.struct_state == -1) if strict_short else (s.struct_state <= 0)
 
         s.struct_ok_long_series.append(struct_ok_long)
         s.struct_ok_short_series.append(struct_ok_short)
 
-        if idx >= swing:
-            pre_hh = max(s.highs[idx - swing: idx + 1])
-            pre_ll = min(s.lows[idx - swing: idx + 1])
-        else:
-            pre_hh = h
-            pre_ll = l
+        window = swing if len(s.highs) >= swing else len(s.highs)
+        pre_hh = max(s.highs[-window:]) if window > 0 else math.nan
+        pre_ll = min(s.lows[-window:]) if window > 0 else math.nan
 
-        pre_bos_up = c > pre_hh + (atr * cfg.bos_buf_atr * 0.50 if not math.isnan(atr) else 0.0)
-        pre_bos_dn = c < pre_ll - (atr * cfg.bos_buf_atr * 0.50 if not math.isnan(atr) else 0.0)
+        if not math.isnan(atr) and not math.isnan(pre_hh):
+            pre_bos_up = c > pre_hh + (atr * cfg.bos_buf_atr * 0.50)
+        else:
+            pre_bos_up = False
+
+        if not math.isnan(atr) and not math.isnan(pre_ll):
+            pre_bos_dn = c < pre_ll - (atr * cfg.bos_buf_atr * 0.50)
+        else:
+            pre_bos_dn = False
 
         if cfg.use_range_bypass and adx_low and pre_bos_up:
             if not cfg.use_daily_in_bypass or daily_ok_long:
@@ -1002,6 +1085,9 @@ class RadarCore:
         regime_long = trend_long and (not cfg.use_regime_filter or c > reg_ma)
         regime_short = trend_short and (not cfg.use_regime_filter or c < reg_ma)
 
+        trend_filter_long_ok = s.daily_trend_up_ok
+        trend_filter_short_ok = s.daily_trend_down_ok
+
         dir_long = diplus > diminus
         dir_short = diminus > diplus
 
@@ -1011,10 +1097,11 @@ class RadarCore:
         vol_ok_long = (not cfg.use_vol) or (vol_ratio > cfg.vol_k_long)
         vol_ok_short = (not cfg.use_vol) or (vol_ratio > cfg.vol_k_long)
 
-        if cfg.require_adx_up:
-            power_ok = (adx_s > adx_base)
-        else:
-            power_ok = (adx_s > adx_base)
+        prev_adx = s.adx_s[-2] if len(s.adx_s) >= 2 else math.nan
+        adx_rising_ok = (not cfg.require_adx_up) or (
+            (not math.isnan(prev_adx)) and (adx_s > prev_adx)
+        )
+        power_ok = (adx_s > adx_base) and adx_rising_ok
 
         rr_ok_long = cfg.tp1_ratio >= 1.6
         rr_ok_short = cfg.tp1_ratio >= 1.6
@@ -1026,7 +1113,7 @@ class RadarCore:
             and dir_long
             and rsi_long_ok
             and vol_ok_long
-            and s.daily_up_ok
+            and trend_filter_long_ok
             and (c > fast_ma)
             and (c > slow_ma)
             and not s.in_cooldown
@@ -1039,7 +1126,7 @@ class RadarCore:
             and dir_long
             and rsi_long_ok
             and vol_ok_long
-            and s.daily_up_ok
+            and trend_filter_long_ok
             and (l <= fast_ma and c > fast_ma)
             and not s.in_cooldown
             and rr_ok_long
@@ -1051,8 +1138,7 @@ class RadarCore:
             and trend_long
             and (rsi > cfg.early_rsi_long)
             and (adx_s > cfg.early_adx)
-            and s.daily_up_ok
-            and not (cfg.use_choch_soft and s.choch_warning)
+            and trend_filter_long_ok
         )
 
         # SHORT
@@ -1064,7 +1150,7 @@ class RadarCore:
             and dir_short
             and rsi_short_ok
             and vol_ok_short
-            and s.daily_down_ok
+            and trend_filter_short_ok
             and (c < fast_ma)
             and (c < slow_ma)
             and not s.in_cooldown
@@ -1078,7 +1164,7 @@ class RadarCore:
             and dir_short
             and rsi_short_ok
             and vol_ok_short
-            and s.daily_down_ok
+            and trend_filter_short_ok
             and (h >= fast_ma and c < fast_ma)
             and not s.in_cooldown
             and rr_ok_short
@@ -1091,10 +1177,18 @@ class RadarCore:
             and trend_short
             and (rsi < cfg.early_rsi_short)
             and (adx_s > cfg.early_adx)
-            and s.daily_down_ok
+            and trend_filter_short_ok
             and guard_short
-            and not (cfg.use_choch_soft and s.choch_warning)
         )
+
+        can_early_long = early_long
+        can_early_short = early_short
+        choch_soft_block = cfg.use_choch_soft and s.choch_warning
+        # CHOCH soft block: only disables early entries
+        if choch_soft_block:
+            can_early_long = False
+            can_early_short = False
+        # breakout / pullback / cross must NOT be disabled here
 
         cross_up = self._cross(fast_ma, slow_ma)
         cross_down = self._crossunder(fast_ma, slow_ma)
@@ -1103,7 +1197,7 @@ class RadarCore:
             cfg.use_cross_entry
             and cross_up
             and ((not cfg.cross_need_adx) or power_ok)
-            and ((not cfg.cross_need_daily) or s.daily_up_ok)
+            and ((not cfg.cross_need_daily) or trend_filter_long_ok)
             and ((not cfg.cross_need_regime) or (c > reg_ma))
             and not s.in_cooldown
             and rr_ok_long
@@ -1113,7 +1207,7 @@ class RadarCore:
             cfg.use_cross_entry
             and cross_down
             and ((not cfg.cross_need_adx) or power_ok)
-            and ((not cfg.cross_need_daily) or s.daily_down_ok)
+            and ((not cfg.cross_need_daily) or trend_filter_short_ok)
             and ((not cfg.cross_need_regime) or (c < reg_ma))
             and not s.in_cooldown
             and rr_ok_short
@@ -1132,11 +1226,11 @@ class RadarCore:
         )
 
         final_long = (
-            (breakout_long or pullback_long or cross_long or early_long)
+            (breakout_long or pullback_long or cross_long or can_early_long)
             and struct_ok_long_relaxed
         )
         final_short = (
-            (breakout_short or pullback_short or cross_short or early_short)
+            (breakout_short or pullback_short or cross_short or can_early_short)
             and struct_ok_short_relaxed
         )
 
@@ -1147,8 +1241,8 @@ class RadarCore:
             "breakout_short": breakout_short,
             "pullback_long": pullback_long,
             "pullback_short": pullback_short,
-            "early_long": early_long,
-            "early_short": early_short,
+            "early_long": can_early_long,
+            "early_short": can_early_short,
             "cross_long": cross_long,
             "cross_short": cross_short,
         }
@@ -1173,7 +1267,18 @@ class RadarCore:
 
         pos_size = s.position_size
         prev_pos_size = s.prev_position_size
-        pos_avg = s.position_avg_price
+        pos_avg = s.position_avg_price if not math.isnan(s.position_avg_price) else close
+
+        if atr is None or math.isnan(atr):
+            atr = 0.0
+        if adx_s is None or math.isnan(adx_s):
+            adx_s = 0.0
+        if di_plus is None or math.isnan(di_plus):
+            di_plus = 0.0
+        if di_minus is None or math.isnan(di_minus):
+            di_minus = 0.0
+        if slow_ma is None or math.isnan(slow_ma):
+            slow_ma = close
 
         # ورود جدید Long
         if pos_size > 0 and prev_pos_size <= 0:
@@ -1224,10 +1329,12 @@ class RadarCore:
                         s.dyn_stop_l = max(s.dyn_stop_l, be_level)
 
             if s.tp1_hit_l and not math.isnan(tp2TrailL):
-                if math.isnan(s.dyn_stop_l):
-                    s.dyn_stop_l = tp2TrailL
+                prev_trail_l = s.dyn_stop_l
+                new_trail_l = tp2TrailL
+                if math.isnan(prev_trail_l):
+                    s.dyn_stop_l = new_trail_l
                 else:
-                    s.dyn_stop_l = max(s.dyn_stop_l, tp2TrailL)
+                    s.dyn_stop_l = max(prev_trail_l, new_trail_l)
 
             if s.struct_state == -1 and not math.isnan(atr):
                 tighten_level = close - 1.6 * atr
@@ -1236,14 +1343,19 @@ class RadarCore:
                 else:
                     s.dyn_stop_l = max(s.dyn_stop_l, tighten_level)
 
+            # Weak Exit Logic (LONG)
             exitWeakRawL = (close < slow_ma) or (adx_s < 18) or (di_plus < di_minus)
 
-            last_not_idx = s.last_not_exitweak_l_idx
+            # Update last index where WeakExit condition was NOT true (trend still healthy)
             if not exitWeakRawL:
                 s.last_not_exitweak_l_idx = idx
-                last_not_idx = idx
-            bars_since_not = idx - last_not_idx
-            exitWeakL = bars_since_not >= cfg.weak_confirm_bars
+
+            last_not_idx = s.last_not_exitweak_l_idx
+            if last_not_idx is None:
+                exitWeakL = False
+            else:
+                bars_since_not = idx - last_not_idx
+                exitWeakL = bars_since_not >= cfg.weak_confirm_bars
 
             if s.inited_l and exitWeakL:
                 candidates = []
@@ -1275,10 +1387,12 @@ class RadarCore:
                         s.dyn_stop_s = min(s.dyn_stop_s, be_level_s)
 
             if s.tp1_hit_s and not math.isnan(tp2TrailS):
-                if math.isnan(s.dyn_stop_s):
-                    s.dyn_stop_s = tp2TrailS
+                prev_trail_s = s.dyn_stop_s
+                new_trail_s = tp2TrailS
+                if math.isnan(prev_trail_s):
+                    s.dyn_stop_s = new_trail_s
                 else:
-                    s.dyn_stop_s = min(s.dyn_stop_s, tp2TrailS)
+                    s.dyn_stop_s = min(prev_trail_s, new_trail_s)
 
             if s.struct_state == 1 and not math.isnan(atr):
                 tighten_s = close + 1.6 * atr
@@ -1287,14 +1401,19 @@ class RadarCore:
                 else:
                     s.dyn_stop_s = min(s.dyn_stop_s, tighten_s)
 
+            # Weak Exit Logic (SHORT)
             exitWeakRawS = (close > slow_ma) or (adx_s < 20) or (di_plus > di_minus)
 
-            last_not_idx_s = s.last_not_exitweak_s_idx
+            # Update last index where WeakExit condition was NOT true (trend still healthy)
             if not exitWeakRawS:
                 s.last_not_exitweak_s_idx = idx
-                last_not_idx_s = idx
-            bars_since_not_s = idx - last_not_idx_s
-            exitWeakS = bars_since_not_s >= cfg.weak_confirm_bars
+
+            last_not_idx_s = s.last_not_exitweak_s_idx
+            if last_not_idx_s is None:
+                exitWeakS = False
+            else:
+                bars_since_not_s = idx - last_not_idx_s
+                exitWeakS = bars_since_not_s >= cfg.weak_confirm_bars
 
             if s.inited_s and exitWeakS:
                 candidates_s = []
@@ -1364,10 +1483,10 @@ class RadarCore:
         if (
             early_long
             and struct_ok_long
+            and pos_size <= 0
             and not (cfg.use_choch_soft and s.choch_warning)
         ):
-            target_early = qty_core * cfg.early_qty_frac
-            add_early = max(target_early - cur_pos_l, 0.0)
+            add_early = qty_core * cfg.early_qty_frac
             if add_early > 0:
                 entries.append(
                     {
@@ -1413,10 +1532,10 @@ class RadarCore:
         if (
             early_short
             and struct_ok_short
+            and pos_size >= 0
             and not (cfg.use_choch_soft and s.choch_warning)
         ):
-            target_early_s = qty_core * cfg.early_qty_frac
-            add_early_s = max(target_early_s - cur_pos_s, 0.0)
+            add_early_s = qty_core * cfg.early_qty_frac
             if add_early_s > 0:
                 entries.append(
                     {
