@@ -329,8 +329,8 @@ class RadarCore:
         trend_ok_long = daily_info["trend_ok_long"]
         trend_ok_short = daily_info["trend_ok_short"]
         s.daily_state = d_state
-        s.daily_up_ok = daily_ok_long
-        s.daily_down_ok = daily_ok_short
+        s.daily_up_ok = trend_ok_long
+        s.daily_down_ok = trend_ok_short
         s.daily_trend_up_ok = trend_ok_long
         s.daily_trend_down_ok = trend_ok_short
 
@@ -786,7 +786,7 @@ class RadarCore:
         roll_hh_d = s.roll_hh_d_series[-1] if s.roll_hh_d_series else math.nan
         roll_ll_d = s.roll_ll_d_series[-1] if s.roll_ll_d_series else math.nan
 
-        buf_d = (atr_d if not math.isnan(atr_d) else 0.0) * cfg.bos_buf_atr
+        buf_d = atr_d * cfg.bos_buf_atr if not math.isnan(atr_d) else math.nan
 
         if not math.isnan(roll_hh_d) and not math.isnan(buf_d):
             d_bos_up = c > roll_hh_d + buf_d
@@ -840,10 +840,12 @@ class RadarCore:
         s.d50_series.append(d50)
 
         window = max(1, int(self.cfg.swing_len * 1.5))
-        slice_h = s.daily_highs[-window:] if s.daily_highs else []
-        slice_l = s.daily_lows[-window:] if s.daily_lows else []
-        roll_hh = max(slice_h) if slice_h else math.nan
-        roll_ll = min(slice_l) if slice_l else math.nan
+        if len(s.daily_highs) >= window:
+            roll_hh = max(s.daily_highs[-window:])
+            roll_ll = min(s.daily_lows[-window:])
+        else:
+            roll_hh = s.daily_highs[-1]
+            roll_ll = s.daily_lows[-1]
 
         s.roll_hh_d_series.append(roll_hh)
         s.roll_ll_d_series.append(roll_ll)
@@ -866,15 +868,17 @@ class RadarCore:
         )
 
         if len(s.atr_d_series) == 0 or math.isnan(s.atr_d_series[-1]):
-            trs: List[float] = []
-            for i in range(n):
+            total_bars = n
+            trs = []
+            for i in range(total_bars):
                 hi = s.daily_highs[i]
                 lo = s.daily_lows[i]
                 pc = s.daily_closes[i - 1] if i > 0 else s.daily_closes[i]
                 trs.append(max(hi - lo, abs(hi - pc), abs(lo - pc)))
 
             window = min(length, len(trs))
-            atr_d = sum(trs[-window:]) / float(window) if window > 0 else math.nan
+            atr_seed = sum(trs[-window:]) / float(window)
+            atr_d = atr_seed
         else:
             prev_atr_d = s.atr_d_series[-1]
             atr_d = (prev_atr_d * (length - 1) + tr) / float(length)
@@ -986,13 +990,16 @@ class RadarCore:
         choch_dn = (not math.isnan(s.last_lh)) and (c > s.last_lh)
         s.choch_warning = cfg.use_choch_soft and (choch_up or choch_dn)
 
-        strict_cond = adx_low
+        strict_cond = adx_low and not s.choch_warning
         strict_long = cfg.adx_soft_strict and strict_cond
-        strict_short = (cfg.strict_short or (cfg.adx_soft_strict and strict_cond))
+        strict_short = (cfg.strict_short or cfg.adx_soft_strict) and strict_cond
 
         if not cfg.use_struct:
             struct_ok_long = True
             struct_ok_short = True
+        elif not atr_ready:
+            struct_ok_long = False
+            struct_ok_short = False
         else:
             struct_ok_long = (s.struct_state == 1) if strict_long else (s.struct_state >= 0)
             struct_ok_short = (s.struct_state == -1) if strict_short else (s.struct_state <= 0)
@@ -1000,7 +1007,7 @@ class RadarCore:
         s.struct_ok_long_series.append(struct_ok_long)
         s.struct_ok_short_series.append(struct_ok_short)
 
-        window = swing if len(s.highs) >= swing else len(s.highs)
+        window = min(swing, len(s.highs))
         pre_hh = max(s.highs[-window:]) if window > 0 else math.nan
         pre_ll = min(s.lows[-window:]) if window > 0 else math.nan
 
@@ -1139,6 +1146,7 @@ class RadarCore:
             and (rsi > cfg.early_rsi_long)
             and (adx_s > cfg.early_adx)
             and trend_filter_long_ok
+            and not (cfg.use_choch_soft and s.choch_warning)
         )
 
         # SHORT
@@ -1216,16 +1224,20 @@ class RadarCore:
             else True
         )
 
-        early_long_filtered = early_long and not (cfg.use_choch_soft and s.choch_warning)
-        early_short_filtered = early_short and not (cfg.use_choch_soft and s.choch_warning)
+        choch_soft_block = cfg.use_choch_soft and s.choch_warning
+
+        cross_long_final = cross_long and not (breakout_long or pullback_long)
+        cross_short_final = cross_short and not (breakout_short or pullback_short)
 
         final_long = (
-            (breakout_long or pullback_long or cross_long or early_long_filtered)
+            (breakout_long or pullback_long or cross_long_final or early_long)
             and struct_ok_long_relaxed
+            and not choch_soft_block
         )
         final_short = (
-            (breakout_short or pullback_short or cross_short or early_short_filtered)
+            (breakout_short or pullback_short or cross_short_final or early_short)
             and struct_ok_short_relaxed
+            and not choch_soft_block
         )
 
         return {
@@ -1235,10 +1247,10 @@ class RadarCore:
             "breakout_short": breakout_short,
             "pullback_long": pullback_long,
             "pullback_short": pullback_short,
-            "early_long": early_long_filtered,
-            "early_short": early_short_filtered,
-            "cross_long": cross_long,
-            "cross_short": cross_short,
+            "early_long": early_long,
+            "early_short": early_short,
+            "cross_long": cross_long_final,
+            "cross_short": cross_short_final,
         }
 
     # ------------------------------------------------------------
@@ -1341,12 +1353,12 @@ class RadarCore:
 
             if not exitWeakRawL:
                 s.last_not_exitweak_l_idx = idx
-
-            last_not_idx = s.last_not_exitweak_l_idx
+                last_not_idx = idx
             if last_not_idx is None:
                 exitWeakL = False
             else:
-                exitWeakL = (idx - last_not_idx) >= cfg.weak_confirm_bars
+                bars_since_not = idx - last_not_idx
+                exitWeakL = bars_since_not >= cfg.weak_confirm_bars
 
             if s.inited_l and exitWeakL:
                 candidates = []
@@ -1396,12 +1408,12 @@ class RadarCore:
 
             if not exitWeakRawS:
                 s.last_not_exitweak_s_idx = idx
-
-            last_not_idx_s = s.last_not_exitweak_s_idx
+                last_not_idx_s = idx
             if last_not_idx_s is None:
                 exitWeakS = False
             else:
-                exitWeakS = (idx - last_not_idx_s) >= cfg.weak_confirm_bars
+                bars_since_not_s = idx - last_not_idx_s
+                exitWeakS = bars_since_not_s >= cfg.weak_confirm_bars
 
             if s.inited_s and exitWeakS:
                 candidates_s = []
