@@ -351,6 +351,9 @@ class RadarCore:
             daily_ok_short=daily_ok_short,
         )
 
+        if s.position_size == 0 and s.prev_position_size != 0:
+            s.last_exit_bar = idx
+
         # Cooldown
         if cfg.use_cooldown and s.last_exit_bar is not None:
             s.in_cooldown = (idx - s.last_exit_bar) < cfg.cooldown_bars
@@ -891,22 +894,30 @@ class RadarCore:
     # ------------------------------------------------------------
     def _pivot_high(self, idx: int, length: int) -> float:
         s = self.state
-        if idx - length < 0 or idx + length >= len(s.highs):
+        center_idx = idx - length
+        if center_idx < length:
             return math.nan
-        center = s.highs[idx]
-        left = s.highs[idx - length: idx]
-        right = s.highs[idx + 1: idx + length + 1]
+        if center_idx + length >= len(s.highs):
+            return math.nan
+
+        center = s.highs[center_idx]
+        left = s.highs[center_idx - length: center_idx]
+        right = s.highs[center_idx + 1: center_idx + length + 1]
         if center == max(left + [center] + right):
             return center
         return math.nan
 
     def _pivot_low(self, idx: int, length: int) -> float:
         s = self.state
-        if idx - length < 0 or idx + length >= len(s.lows):
+        center_idx = idx - length
+        if center_idx < length:
             return math.nan
-        center = s.lows[idx]
-        left = s.lows[idx - length: idx]
-        right = s.lows[idx + 1: idx + length + 1]
+        if center_idx + length >= len(s.lows):
+            return math.nan
+
+        center = s.lows[center_idx]
+        left = s.lows[center_idx - length: center_idx]
+        right = s.lows[center_idx + 1: center_idx + length + 1]
         if center == min(left + [center] + right):
             return center
         return math.nan
@@ -1329,7 +1340,6 @@ class RadarCore:
 
             exitWeakRawL = (close < slow_ma) or (adx_s < 18) or (di_plus < di_minus)
 
-            last_not_idx = s.last_not_exitweak_l_idx
             if not exitWeakRawL:
                 s.last_not_exitweak_l_idx = idx
                 last_not_idx = idx
@@ -1385,7 +1395,6 @@ class RadarCore:
 
             exitWeakRawS = (close > slow_ma) or (adx_s < 20) or (di_plus > di_minus)
 
-            last_not_idx_s = s.last_not_exitweak_s_idx
             if not exitWeakRawS:
                 s.last_not_exitweak_s_idx = idx
                 last_not_idx_s = idx
@@ -1463,10 +1472,10 @@ class RadarCore:
         if (
             early_long
             and struct_ok_long
+            and pos_size <= 0
             and not (cfg.use_choch_soft and s.choch_warning)
         ):
-            target_early = qty_core * cfg.early_qty_frac
-            add_early = max(target_early - cur_pos_l, 0.0)
+            add_early = qty_core * cfg.early_qty_frac
             if add_early > 0:
                 entries.append(
                     {
@@ -1512,10 +1521,10 @@ class RadarCore:
         if (
             early_short
             and struct_ok_short
+            and pos_size >= 0
             and not (cfg.use_choch_soft and s.choch_warning)
         ):
-            target_early_s = qty_core * cfg.early_qty_frac
-            add_early_s = max(target_early_s - cur_pos_s, 0.0)
+            add_early_s = qty_core * cfg.early_qty_frac
             if add_early_s > 0:
                 entries.append(
                     {
