@@ -1355,6 +1355,7 @@ class RadarCore:
                 else:
                     s.dyn_stop_l = max(s.dyn_stop_l, tighten_level)
 
+            # Weak Exit Logic (LONG)
             exitWeakRawL = (close < slow_ma) or (adx_s < 18) or (di_plus < di_minus)
 
             if not exitWeakRawL:
@@ -1410,6 +1411,7 @@ class RadarCore:
                 else:
                     s.dyn_stop_s = min(s.dyn_stop_s, tighten_s)
 
+            # Weak Exit Logic (SHORT)
             exitWeakRawS = (close > slow_ma) or (adx_s < 20) or (di_plus > di_minus)
 
             if not exitWeakRawS:
