@@ -502,17 +502,32 @@ class RadarCore:
         s_val = sum(v * w for v, w in zip(window, weights))
         return s_val / float(sum(weights))
 
-    @staticmethod
-    def _hma(series: List[float], length: int) -> float:
+    def _hma(self, series: List[float], length: int) -> float:
         if length <= 0 or len(series) < length:
             return math.nan
+
         half_len = max(1, length // 2)
         sqrt_len = max(1, int(math.sqrt(length)))
 
-        wma_half = RadarCore._wma(series, half_len)
-        wma_full = RadarCore._wma(series, length)
-        diff = 2.0 * wma_half - wma_full
-        return diff  # تقریب HMA
+        temps: List[float] = []
+        for i in range(sqrt_len):
+            sub_end = len(series) - i
+            if sub_end < length:
+                break
+            sub_series = series[:sub_end]
+            wma_half = self._wma(sub_series, half_len)
+            wma_full = self._wma(sub_series, length)
+            if math.isnan(wma_half) or math.isnan(wma_full):
+                temp = math.nan
+            else:
+                temp = 2.0 * wma_half - wma_full
+            temps.append(temp)
+
+        if len(temps) < sqrt_len:
+            return math.nan
+
+        temps = list(reversed(temps))
+        return self._wma(temps, sqrt_len)
 
     def _update_ma(self, series: List[float], src: List[float], length: int, ma_type: str) -> float:
         if len(src) == 0:
@@ -567,16 +582,15 @@ class RadarCore:
         )
 
         if len(s.atr_series) == 0 or math.isnan(s.atr_series[-1]):
-            if n < length + 1:
-                s.atr_series.append(math.nan)
-                return math.nan
-            trs = []
-            for i in range(n - length, n):
+            trs: List[float] = []
+            for i in range(n):
                 hi = s.highs[i]
                 lo = s.lows[i]
                 pc = s.closes[i - 1] if i > 0 else s.closes[i]
                 trs.append(max(hi - lo, abs(hi - pc), abs(lo - pc)))
-            atr = sum(trs) / float(length)
+
+            window = min(length, len(trs))
+            atr = sum(trs[-window:]) / float(window) if window > 0 else math.nan
         else:
             prev_atr = s.atr_series[-1]
             atr = (prev_atr * (length - 1) + tr) / float(length)
