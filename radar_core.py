@@ -329,8 +329,8 @@ class RadarCore:
         trend_ok_long = daily_info["trend_ok_long"]
         trend_ok_short = daily_info["trend_ok_short"]
         s.daily_state = d_state
-        s.daily_up_ok = daily_ok_long
-        s.daily_down_ok = daily_ok_short
+        s.daily_up_ok = trend_ok_long
+        s.daily_down_ok = trend_ok_short
         s.daily_trend_up_ok = trend_ok_long
         s.daily_trend_down_ok = trend_ok_short
 
@@ -865,15 +865,17 @@ class RadarCore:
         )
 
         if len(s.atr_d_series) == 0 or math.isnan(s.atr_d_series[-1]):
-            trs: List[float] = []
-            for i in range(n):
+            total_bars = n
+            trs = []
+            for i in range(total_bars):
                 hi = s.daily_highs[i]
                 lo = s.daily_lows[i]
                 pc = s.daily_closes[i - 1] if i > 0 else s.daily_closes[i]
                 trs.append(max(hi - lo, abs(hi - pc), abs(lo - pc)))
 
             window = min(length, len(trs))
-            atr_d = sum(trs[-window:]) / float(window) if window > 0 else math.nan
+            atr_seed = sum(trs[-window:]) / float(window)
+            atr_d = atr_seed
         else:
             prev_atr_d = s.atr_d_series[-1]
             atr_d = (prev_atr_d * (length - 1) + tr) / float(length)
