@@ -329,8 +329,8 @@ class RadarCore:
         trend_ok_long = daily_info["trend_ok_long"]
         trend_ok_short = daily_info["trend_ok_short"]
         s.daily_state = d_state
-        s.daily_up_ok = daily_ok_long
-        s.daily_down_ok = daily_ok_short
+        s.daily_up_ok = trend_ok_long
+        s.daily_down_ok = trend_ok_short
         s.daily_trend_up_ok = trend_ok_long
         s.daily_trend_down_ok = trend_ok_short
 
@@ -865,15 +865,17 @@ class RadarCore:
         )
 
         if len(s.atr_d_series) == 0 or math.isnan(s.atr_d_series[-1]):
-            trs: List[float] = []
-            for i in range(n):
+            total_bars = n
+            trs = []
+            for i in range(total_bars):
                 hi = s.daily_highs[i]
                 lo = s.daily_lows[i]
                 pc = s.daily_closes[i - 1] if i > 0 else s.daily_closes[i]
                 trs.append(max(hi - lo, abs(hi - pc), abs(lo - pc)))
 
             window = min(length, len(trs))
-            atr_d = sum(trs[-window:]) / float(window) if window > 0 else math.nan
+            atr_seed = sum(trs[-window:]) / float(window)
+            atr_d = atr_seed
         else:
             prev_atr_d = s.atr_d_series[-1]
             atr_d = (prev_atr_d * (length - 1) + tr) / float(length)
@@ -994,7 +996,7 @@ class RadarCore:
         s.struct_ok_long_series.append(struct_ok_long)
         s.struct_ok_short_series.append(struct_ok_short)
 
-        window = swing if len(s.highs) >= swing else len(s.highs)
+        window = min(swing, len(s.highs))
         pre_hh = max(s.highs[-window:]) if window > 0 else math.nan
         pre_ll = min(s.lows[-window:]) if window > 0 else math.nan
 
@@ -1214,31 +1216,19 @@ class RadarCore:
 
         choch_soft_block = cfg.use_choch_soft and s.choch_warning
 
-        cross_long_final = cross_long and not choch_soft_block
-        cross_short_final = cross_short and not choch_soft_block
+        cross_long_final = cross_long and not (breakout_long or pullback_long)
+        cross_short_final = cross_short and not (breakout_short or pullback_short)
 
-        final_long = False
-        final_short = False
-
-        if not choch_soft_block and struct_ok_long_relaxed:
-            if early_long:
-                final_long = True
-            elif cross_long_final:
-                final_long = True
-            elif pullback_long:
-                final_long = True
-            elif breakout_long:
-                final_long = True
-
-        if not choch_soft_block and struct_ok_short_relaxed:
-            if early_short:
-                final_short = True
-            elif cross_short_final:
-                final_short = True
-            elif pullback_short:
-                final_short = True
-            elif breakout_short:
-                final_short = True
+        final_long = (
+            (breakout_long or pullback_long or cross_long_final or early_long)
+            and struct_ok_long_relaxed
+            and not choch_soft_block
+        )
+        final_short = (
+            (breakout_short or pullback_short or cross_short_final or early_short)
+            and struct_ok_short_relaxed
+            and not choch_soft_block
+        )
 
         return {
             "should_long": final_long,
