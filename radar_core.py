@@ -783,14 +783,14 @@ class RadarCore:
         roll_hh_d = s.roll_hh_d_series[-1] if s.roll_hh_d_series else math.nan
         roll_ll_d = s.roll_ll_d_series[-1] if s.roll_ll_d_series else math.nan
 
-        buf_d = (atr_d if not math.isnan(atr_d) else 0.0) * cfg.bos_buf_atr
+        buf_d = atr_d * cfg.bos_buf_atr if not math.isnan(atr_d) else math.nan
 
-        if not math.isnan(roll_hh_d):
+        if not math.isnan(roll_hh_d) and not math.isnan(buf_d):
             d_bos_up = c > roll_hh_d + buf_d
         else:
             d_bos_up = False
 
-        if not math.isnan(roll_ll_d):
+        if not math.isnan(roll_ll_d) and not math.isnan(buf_d):
             d_bos_dn = c < roll_ll_d - buf_d
         else:
             d_bos_dn = False
@@ -836,7 +836,7 @@ class RadarCore:
         s.d20_series.append(d20)
         s.d50_series.append(d50)
 
-        window = max(1, int(round(self.cfg.swing_len * 1.5)))
+        window = max(1, int(self.cfg.swing_len * 1.5))
         if len(s.daily_highs) >= window:
             roll_hh = max(s.daily_highs[-window:])
             roll_ll = min(s.daily_lows[-window:])
@@ -979,8 +979,9 @@ class RadarCore:
         choch_dn = (not math.isnan(s.last_lh)) and (c > s.last_lh)
         s.choch_warning = cfg.use_choch_soft and (choch_up or choch_dn)
 
-        strict_long = cfg.adx_soft_strict and adx_low
-        strict_short = cfg.strict_short or (cfg.adx_soft_strict and adx_low)
+        strict_cond = adx_low and not s.choch_warning
+        strict_long = cfg.adx_soft_strict and strict_cond
+        strict_short = (cfg.strict_short or cfg.adx_soft_strict) and strict_cond
 
         if not cfg.use_struct:
             struct_ok_long = True
@@ -989,8 +990,8 @@ class RadarCore:
             struct_ok_long = False
             struct_ok_short = False
         else:
-            struct_ok_long = s.struct_state == 1 if strict_long else s.struct_state >= 0
-            struct_ok_short = s.struct_state == -1 if strict_short else s.struct_state <= 0
+            struct_ok_long = (s.struct_state == 1) if strict_long else (s.struct_state >= 0)
+            struct_ok_short = (s.struct_state == -1) if strict_short else (s.struct_state <= 0)
 
         s.struct_ok_long_series.append(struct_ok_long)
         s.struct_ok_short_series.append(struct_ok_short)
@@ -1313,10 +1314,12 @@ class RadarCore:
                         s.dyn_stop_l = max(s.dyn_stop_l, be_level)
 
             if s.tp1_hit_l and not math.isnan(tp2TrailL):
-                if math.isnan(s.dyn_stop_l):
-                    s.dyn_stop_l = tp2TrailL
+                prev_trail_l = s.dyn_stop_l
+                new_trail_l = tp2TrailL
+                if math.isnan(prev_trail_l):
+                    s.dyn_stop_l = new_trail_l
                 else:
-                    s.dyn_stop_l = max(s.dyn_stop_l, tp2TrailL)
+                    s.dyn_stop_l = max(prev_trail_l, new_trail_l)
 
             if s.struct_state == -1 and not math.isnan(atr):
                 tighten_level = close - 1.6 * atr
@@ -1367,10 +1370,12 @@ class RadarCore:
                         s.dyn_stop_s = min(s.dyn_stop_s, be_level_s)
 
             if s.tp1_hit_s and not math.isnan(tp2TrailS):
-                if math.isnan(s.dyn_stop_s):
-                    s.dyn_stop_s = tp2TrailS
+                prev_trail_s = s.dyn_stop_s
+                new_trail_s = tp2TrailS
+                if math.isnan(prev_trail_s):
+                    s.dyn_stop_s = new_trail_s
                 else:
-                    s.dyn_stop_s = min(s.dyn_stop_s, tp2TrailS)
+                    s.dyn_stop_s = min(prev_trail_s, new_trail_s)
 
             if s.struct_state == 1 and not math.isnan(atr):
                 tighten_s = close + 1.6 * atr
