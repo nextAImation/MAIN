@@ -1176,7 +1176,6 @@ class RadarCore:
             and (adx_s > cfg.early_adx)
             and trend_filter_short_ok
             and guard_short
-            and not (cfg.use_choch_soft and s.choch_warning)
         )
 
         cross_up = self._cross(fast_ma, slow_ma)
