@@ -210,8 +210,8 @@ class RadarState:
     inited_s: bool = False
 
     # Weak exit barssince state
-    last_not_exitweak_l_idx: int = 0
-    last_not_exitweak_s_idx: int = 0
+    last_not_exitweak_l_idx: Optional[int] = None
+    last_not_exitweak_s_idx: Optional[int] = None
 
     # Cooldown
     last_exit_bar: Optional[int] = None
@@ -951,15 +951,16 @@ class RadarCore:
         s.adx_low_series.append(adx_low)
 
         buf_mult = 1.4 if adx_low else 0.8
-        bos_buf = cfg.bos_buf_atr * (atr if not math.isnan(atr) else 0.0) * buf_mult
+        atr_ready = not math.isnan(atr)
+        bos_buf = cfg.bos_buf_atr * atr * buf_mult if atr_ready else math.nan
         s.bos_buf_series.append(bos_buf)
 
-        if not math.isnan(s.last_hh):
+        if not math.isnan(s.last_hh) and not math.isnan(bos_buf):
             bos_up = c > s.last_hh + bos_buf
         else:
             bos_up = False
 
-        if not math.isnan(s.last_ll):
+        if not math.isnan(s.last_ll) and not math.isnan(bos_buf):
             bos_dn = c < s.last_ll - bos_buf
         else:
             bos_dn = False
@@ -984,6 +985,9 @@ class RadarCore:
         if not cfg.use_struct:
             struct_ok_long = True
             struct_ok_short = True
+        elif not atr_ready:
+            struct_ok_long = False
+            struct_ok_short = False
         else:
             struct_ok_long = s.struct_state == 1 if strict_long else s.struct_state >= 0
             struct_ok_short = s.struct_state == -1 if strict_short else s.struct_state <= 0
@@ -991,15 +995,19 @@ class RadarCore:
         s.struct_ok_long_series.append(struct_ok_long)
         s.struct_ok_short_series.append(struct_ok_short)
 
-        if idx >= swing:
-            pre_hh = max(s.highs[idx - swing: idx + 1])
-            pre_ll = min(s.lows[idx - swing: idx + 1])
-        else:
-            pre_hh = h
-            pre_ll = l
+        window = min(swing, len(s.highs))
+        pre_hh = max(s.highs[-window:]) if window > 0 else math.nan
+        pre_ll = min(s.lows[-window:]) if window > 0 else math.nan
 
-        pre_bos_up = c > pre_hh + (atr * cfg.bos_buf_atr * 0.50 if not math.isnan(atr) else 0.0)
-        pre_bos_dn = c < pre_ll - (atr * cfg.bos_buf_atr * 0.50 if not math.isnan(atr) else 0.0)
+        if not math.isnan(atr) and not math.isnan(pre_hh):
+            pre_bos_up = c > pre_hh + (atr * cfg.bos_buf_atr * 0.50)
+        else:
+            pre_bos_up = False
+
+        if not math.isnan(atr) and not math.isnan(pre_ll):
+            pre_bos_dn = c < pre_ll - (atr * cfg.bos_buf_atr * 0.50)
+        else:
+            pre_bos_dn = False
 
         if cfg.use_range_bypass and adx_low and pre_bos_up:
             if not cfg.use_daily_in_bypass or daily_ok_long:
@@ -1072,6 +1080,9 @@ class RadarCore:
         regime_long = trend_long and (not cfg.use_regime_filter or c > reg_ma)
         regime_short = trend_short and (not cfg.use_regime_filter or c < reg_ma)
 
+        trend_filter_long_ok = s.daily_trend_up_ok
+        trend_filter_short_ok = s.daily_trend_down_ok
+
         dir_long = diplus > diminus
         dir_short = diminus > diplus
 
@@ -1097,7 +1108,7 @@ class RadarCore:
             and dir_long
             and rsi_long_ok
             and vol_ok_long
-            and s.daily_up_ok
+            and trend_filter_long_ok
             and (c > fast_ma)
             and (c > slow_ma)
             and not s.in_cooldown
@@ -1110,7 +1121,7 @@ class RadarCore:
             and dir_long
             and rsi_long_ok
             and vol_ok_long
-            and s.daily_up_ok
+            and trend_filter_long_ok
             and (l <= fast_ma and c > fast_ma)
             and not s.in_cooldown
             and rr_ok_long
@@ -1122,7 +1133,7 @@ class RadarCore:
             and trend_long
             and (rsi > cfg.early_rsi_long)
             and (adx_s > cfg.early_adx)
-            and s.daily_up_ok
+            and trend_filter_long_ok
             and not (cfg.use_choch_soft and s.choch_warning)
         )
 
@@ -1135,7 +1146,7 @@ class RadarCore:
             and dir_short
             and rsi_short_ok
             and vol_ok_short
-            and s.daily_down_ok
+            and trend_filter_short_ok
             and (c < fast_ma)
             and (c < slow_ma)
             and not s.in_cooldown
@@ -1149,7 +1160,7 @@ class RadarCore:
             and dir_short
             and rsi_short_ok
             and vol_ok_short
-            and s.daily_down_ok
+            and trend_filter_short_ok
             and (h >= fast_ma and c < fast_ma)
             and not s.in_cooldown
             and rr_ok_short
@@ -1162,7 +1173,7 @@ class RadarCore:
             and trend_short
             and (rsi < cfg.early_rsi_short)
             and (adx_s > cfg.early_adx)
-            and s.daily_down_ok
+            and trend_filter_short_ok
             and guard_short
             and not (cfg.use_choch_soft and s.choch_warning)
         )
@@ -1174,7 +1185,7 @@ class RadarCore:
             cfg.use_cross_entry
             and cross_up
             and ((not cfg.cross_need_adx) or power_ok)
-            and ((not cfg.cross_need_daily) or s.daily_up_ok)
+            and ((not cfg.cross_need_daily) or trend_filter_long_ok)
             and ((not cfg.cross_need_regime) or (c > reg_ma))
             and not s.in_cooldown
             and rr_ok_long
@@ -1184,7 +1195,7 @@ class RadarCore:
             cfg.use_cross_entry
             and cross_down
             and ((not cfg.cross_need_adx) or power_ok)
-            and ((not cfg.cross_need_daily) or s.daily_down_ok)
+            and ((not cfg.cross_need_daily) or trend_filter_short_ok)
             and ((not cfg.cross_need_regime) or (c < reg_ma))
             and not s.in_cooldown
             and rr_ok_short
@@ -1202,13 +1213,20 @@ class RadarCore:
             else True
         )
 
+        choch_soft_block = cfg.use_choch_soft and s.choch_warning
+
+        cross_long_final = cross_long and not (breakout_long or pullback_long)
+        cross_short_final = cross_short and not (breakout_short or pullback_short)
+
         final_long = (
-            (breakout_long or pullback_long or cross_long or early_long)
+            (breakout_long or pullback_long or cross_long_final or early_long)
             and struct_ok_long_relaxed
+            and not choch_soft_block
         )
         final_short = (
-            (breakout_short or pullback_short or cross_short or early_short)
+            (breakout_short or pullback_short or cross_short_final or early_short)
             and struct_ok_short_relaxed
+            and not choch_soft_block
         )
 
         return {
@@ -1220,8 +1238,8 @@ class RadarCore:
             "pullback_short": pullback_short,
             "early_long": early_long,
             "early_short": early_short,
-            "cross_long": cross_long,
-            "cross_short": cross_short,
+            "cross_long": cross_long_final,
+            "cross_short": cross_short_final,
         }
 
     # ------------------------------------------------------------
@@ -1313,8 +1331,11 @@ class RadarCore:
             if not exitWeakRawL:
                 s.last_not_exitweak_l_idx = idx
                 last_not_idx = idx
-            bars_since_not = idx - last_not_idx
-            exitWeakL = bars_since_not >= cfg.weak_confirm_bars
+            if last_not_idx is None:
+                exitWeakL = False
+            else:
+                bars_since_not = idx - last_not_idx
+                exitWeakL = bars_since_not >= cfg.weak_confirm_bars
 
             if s.inited_l and exitWeakL:
                 candidates = []
@@ -1364,8 +1385,11 @@ class RadarCore:
             if not exitWeakRawS:
                 s.last_not_exitweak_s_idx = idx
                 last_not_idx_s = idx
-            bars_since_not_s = idx - last_not_idx_s
-            exitWeakS = bars_since_not_s >= cfg.weak_confirm_bars
+            if last_not_idx_s is None:
+                exitWeakS = False
+            else:
+                bars_since_not_s = idx - last_not_idx_s
+                exitWeakS = bars_since_not_s >= cfg.weak_confirm_bars
 
             if s.inited_s and exitWeakS:
                 candidates_s = []
